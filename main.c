@@ -8,17 +8,27 @@
 int lsh_cd(char **args);
 int lsh_help(char **args);
 int lsh_exit(char **args);
+int lsh_dir(char **args);
+int lsh_clear(char **args);
 
 char *builtin_str[] = {
   "cd",
   "help",
-  "exit"
+  "exit",
+  "ls",
+  "dir",
+  "clear",
+  "cls",
 };
 
 int (*builtin_func[]) (char **) = {
   &lsh_cd,
   &lsh_help,
-  &lsh_exit
+  &lsh_exit,
+  &lsh_dir,
+  &lsh_dir,
+  &lsh_clear,
+  &lsh_clear,
 };
 
 int lsh_num_builtins() {
@@ -35,6 +45,99 @@ int lsh_cd(char **args) {
   }
   return 1;
 }
+
+
+int lsh_clear(char **args) {
+    // Get the handle to the console
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    
+    if (hConsole == INVALID_HANDLE_VALUE) {
+        perror("lsh: failed to get console handle");
+        return 1;
+    }
+    
+    // Get console information
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (!GetConsoleScreenBufferInfo(hConsole, &csbi)) {
+        perror("lsh: failed to get console info");
+        return 1;
+    }
+    
+    // Calculate total cells in console
+    DWORD cellCount = csbi.dwSize.X * csbi.dwSize.Y;
+    
+    // Fill the entire buffer with spaces
+    DWORD count;
+    COORD homeCoords = {0, 0};
+    
+    if (!FillConsoleOutputCharacter(hConsole, ' ', cellCount, homeCoords, &count)) {
+        perror("lsh: failed to fill console");
+        return 1;
+    }
+    
+    // Fill the entire buffer with the current attributes
+    if (!FillConsoleOutputAttribute(hConsole, csbi.wAttributes, cellCount, homeCoords, &count)) {
+        perror("lsh: failed to set console attributes");
+        return 1;
+    }
+    
+    // Move the cursor to home position
+    SetConsoleCursorPosition(hConsole, homeCoords);
+    
+    return 1;
+}
+
+
+
+
+int lsh_dir(char **args) {
+  char cwd[1024];
+  WIN32_FIND_DATA findData;
+  HANDLE hFind;
+  
+  // Get current directory
+  if (_getcwd(cwd, sizeof(cwd)) == NULL) {
+    perror("lsh");
+    return 1;
+  }
+  
+  // Print current directory
+  // printf("Directory of %s\n\n", cwd);
+  
+  // Prepare search pattern for all files
+  char searchPath[1024];
+  strcpy(searchPath, cwd);
+  strcat(searchPath, "\\*");
+  
+  // Find first file
+  hFind = FindFirstFile(searchPath, &findData);
+  
+  if (hFind == INVALID_HANDLE_VALUE) {
+    fprintf(stderr, "lsh: Failed to list directory contents\n");
+    return 1;
+  }
+  
+  // List all files
+  do {
+    // Skip . and .. directories for cleaner output
+    if (strcmp(findData.cFileName, ".") != 0 && strcmp(findData.cFileName, "..") != 0) {
+      // Check if it's a directory
+      if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        printf("<DIR>\t%s\n", findData.cFileName);
+      } else {
+        // Print file name and size
+        printf("%u\t%s\n", findData.nFileSizeLow, findData.cFileName);
+      }
+    }
+  } while (FindNextFile(hFind, &findData));
+  
+  // Close find handle
+  FindClose(hFind);
+  printf("\n");
+  
+  return 1;
+}
+
 
 int lsh_help(char **args) {
   int i;
@@ -165,21 +268,56 @@ char **lsh_split_line(char *line) {
   return tokens;
 }
 
+
 void lsh_loop(void) {
   char *line;
   char **args;
   int status;
-
+  char cwd[1024];
+  char prompt_path[1024];
+  char username[256] = "Elden Lord"; // Default value if username can't be retrieved
+  
+ 
   do {
-    printf("> ");
+    // Get current directory for the prompt
+    if (_getcwd(cwd, sizeof(cwd)) == NULL) {
+      perror("lsh");
+      strcpy(prompt_path, "unknown_path"); // Fallback in case of error
+    } else {
+      // Find the last directory in the path
+      char *last_dir = strrchr(cwd, '\\');
+      
+      if (last_dir != NULL) {
+        char last_dir_name[256];
+        strcpy(last_dir_name, last_dir + 1); // Save the last directory name
+        
+        *last_dir = '\0';  // Temporarily terminate string at last backslash
+        char *parent_dir = strrchr(cwd, '\\');
+        
+        if (parent_dir != NULL) {
+          // We have at least two levels deep
+          sprintf(prompt_path, "%s in %s\\%s", username, parent_dir + 1, last_dir_name);
+        } else {
+          // We're at top level (like C:)
+          sprintf(prompt_path, "%s in %s", username, last_dir_name);
+        }
+      } else {
+        // No backslash found (rare case)
+        sprintf(prompt_path, "%s in %s", username, cwd);
+      }
+    }
+    
+    // Print prompt with username and shortened directory
+    printf("%s> ", prompt_path);
+    
     line = lsh_read_line();
     args = lsh_split_line(line);
     status = lsh_execute(args);
-
     free(line);
     free(args);
   } while (status);
 }
+
 
 int main(int argc, char **argv) {
   lsh_loop();
