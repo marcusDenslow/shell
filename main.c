@@ -275,9 +275,14 @@ void lsh_loop(void) {
   int status;
   char cwd[1024];
   char prompt_path[1024];
-  char username[256] = "Elden Lord"; // Default value if username can't be retrieved
+  char username[256] = "user"; // Default value if username can't be retrieved
+  DWORD username_len = sizeof(username);
   
- 
+  // Get the Windows username once (doesn't change during execution)
+  if (!GetUserName(username, &username_len)) {
+    perror("lsh: failed to get username");
+  }
+  
   do {
     // Get current directory for the prompt
     if (_getcwd(cwd, sizeof(cwd)) == NULL) {
