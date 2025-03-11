@@ -551,7 +551,67 @@ int lsh_execute(char **args) {
 
 #define LSH_RL_BUFSIZE 1024
 
-// Modified read_line function with improved tab cycling and enter acceptance
+// Helper function to redraw tab completion without flickering
+void redraw_tab_suggestion(HANDLE hConsole, COORD promptEndPos, 
+                           char *original_line, char *tab_match, char *last_tab_prefix,
+                           int tab_index, int tab_num_matches, WORD originalAttributes) {
+    CONSOLE_SCREEN_BUFFER_INFO consoleInfo;
+    
+    // Lock the console changes to minimize flickering
+    CONSOLE_CURSOR_INFO cursorInfo;
+    GetConsoleCursorInfo(hConsole, &cursorInfo);
+    BOOL originalCursorVisible = cursorInfo.bVisible;
+    
+    // Hide cursor during redraw
+    cursorInfo.bVisible = FALSE;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+    
+    // Clear line with a single API call (more efficient than printing spaces)
+    DWORD numCharsWritten;
+    COORD clearPos = promptEndPos;
+    FillConsoleOutputCharacter(hConsole, ' ', 120, clearPos, &numCharsWritten);
+    FillConsoleOutputAttribute(hConsole, originalAttributes, 120, clearPos, &numCharsWritten);
+    
+    // Position cursor at beginning of line (immediately after prompt)
+    SetConsoleCursorPosition(hConsole, promptEndPos);
+    
+    // Get the prefix length (what user typed)
+    int prefixLen = strlen(last_tab_prefix);
+    
+    // 1. Print the command prefix (e.g., "cd ")
+    WriteConsole(hConsole, original_line, strlen(original_line), &numCharsWritten, NULL);
+    
+    // 2. Print matching prefix part
+    char matchPrefix[1024] = "";
+    strncpy(matchPrefix, tab_match, prefixLen);
+    matchPrefix[prefixLen] = '\0';
+    WriteConsole(hConsole, matchPrefix, strlen(matchPrefix), &numCharsWritten, NULL);
+    
+    // 3. Print remaining suggestion in gray
+    SetConsoleTextAttribute(hConsole, FOREGROUND_INTENSITY);
+    WriteConsole(hConsole, tab_match + prefixLen, strlen(tab_match + prefixLen), &numCharsWritten, NULL);
+    
+    // Save cursor position at end of suggestion
+    GetConsoleScreenBufferInfo(hConsole, &consoleInfo);
+    COORD endOfSuggestionPos = consoleInfo.dwCursorPosition;
+    
+    // 4. Print indicator if needed
+    if (tab_num_matches > 1) {
+        char indicatorBuffer[20];
+        sprintf(indicatorBuffer, " (%d/%d)", tab_index + 1, tab_num_matches);
+        WriteConsole(hConsole, indicatorBuffer, strlen(indicatorBuffer), &numCharsWritten, NULL);
+    }
+    
+    // Reset attributes
+    SetConsoleTextAttribute(hConsole, originalAttributes);
+    
+    // Move cursor to end of suggestion (before indicator)
+    SetConsoleCursorPosition(hConsole, endOfSuggestionPos);
+    
+    // Show cursor again
+    cursorInfo.bVisible = originalCursorVisible;
+    SetConsoleCursorInfo(hConsole, &cursorInfo);
+}// Modified read_line function with improved tab cycling and enter acceptance
 char *lsh_read_line(void) {
     int bufsize = LSH_RL_BUFSIZE;
     int position = 0;
@@ -710,16 +770,29 @@ char *lsh_read_line(void) {
                 tab_index = 0;
                 last_tab_prefix[0] = '\0';
                 
-                // Clear the current line and redraw it
-                GetConsoleScreenBufferInfo(hConsole, &consoleInfo);
+                // Hide cursor to prevent flicker
+                CONSOLE_CURSOR_INFO cursorInfo;
+                GetConsoleCursorInfo(hConsole, &cursorInfo);
+                BOOL originalCursorVisible = cursorInfo.bVisible;
+                cursorInfo.bVisible = FALSE;
+                SetConsoleCursorInfo(hConsole, &cursorInfo);
                 
-                // Move to start of line and clear everything
-                COORD lineStartPos = promptEndPos;
-                SetConsoleCursorPosition(hConsole, lineStartPos);
+                // Clear the line
+                DWORD numCharsWritten;
+                COORD clearPos = promptEndPos;
+                FillConsoleOutputCharacter(hConsole, ' ', 120, clearPos, &numCharsWritten);
+                FillConsoleOutputAttribute(hConsole, originalAttributes, 120, clearPos, &numCharsWritten);
+                
+                // Move cursor back to beginning
+                SetConsoleCursorPosition(hConsole, promptEndPos);
                 
                 // Print the full command with the accepted match
                 buffer[position] = '\0';
-                printf("%s", buffer);
+                WriteConsole(hConsole, buffer, strlen(buffer), &numCharsWritten, NULL);
+                
+                // Restore cursor visibility
+                cursorInfo.bVisible = originalCursorVisible;
+                SetConsoleCursorInfo(hConsole, &cursorInfo);
                 
                 // Set flag to execute on next Enter
                 ready_to_execute = 1;
@@ -896,73 +969,90 @@ char *lsh_read_line(void) {
                     last_tab_prefix[0] = '\0';
                     continue;
                 }
+                
+                // Display the first match with our helper function to avoid flickering
+                if (tab_matches && tab_num_matches > 0) {
+                    redraw_tab_suggestion(hConsole, promptEndPos, original_line, 
+                                          tab_matches[tab_index], last_tab_prefix,
+                                          tab_index, tab_num_matches, originalAttributes);
+                    continue;
+                }
             } else {
                 // Same prefix, cycle to next match
                 tab_index = (tab_index + 1) % tab_num_matches;
+                
+                // Redraw with the next match
+                redraw_tab_suggestion(hConsole, promptEndPos, original_line, 
+                                      tab_matches[tab_index], last_tab_prefix,
+                                      tab_index, tab_num_matches, originalAttributes);
+                continue;
             }
             
             if (tab_matches && tab_num_matches > 0) {
-                // Get cursor position
-                GetConsoleScreenBufferInfo(hConsole, &consoleInfo);
+                // Create a buffer for what we want to display in one go
+                char displayBuffer[2048] = "";
                 
-                // Move cursor to beginning of the line (just after prompt)
-                SetConsoleCursorPosition(hConsole, promptEndPos);
+                // Same prefix, cycle to next match
+                tab_index = (tab_index + 1) % tab_num_matches;
                 
-                // Clear the entire line by printing spaces
-                for (int i = 0; i < 80; i++) { // Assumes terminal is at least 80 columns wide
-                    putchar(' ');
-                }
+                // Build the command display in our buffer instead of printing directly
+                // First the original command prefix
+                strcat(displayBuffer, original_line);
                 
-                // Move cursor back to beginning of line
-                SetConsoleCursorPosition(hConsole, promptEndPos);
-                
-                // Redraw the entire line from scratch with new suggestion
-                // Print the prefix part that the user typed
-                printf("%s", original_line);
-                
-                // Get prefix length for later use
+                // Get prefix length for later use (what user typed after the command)
                 int prefixLen = strlen(last_tab_prefix);
                 
-                // Print the matching prefix part in normal color
+                // Matching prefix part in normal color
                 char matchPrefix[1024] = "";
                 strncpy(matchPrefix, tab_matches[tab_index], prefixLen);
                 matchPrefix[prefixLen] = '\0';
-                printf("%s", matchPrefix);
+                strcat(displayBuffer, matchPrefix);
                 
-                // Print the rest of the match in gray
+                // The rest of the match
+                strcat(displayBuffer, tab_matches[tab_index] + prefixLen);
+                
+                // Add indicator if needed
+                char indicatorBuffer[20] = "";
+                if (tab_num_matches > 1) {
+                    sprintf(indicatorBuffer, " (%d/%d)", tab_index + 1, tab_num_matches);
+                }
+                
+                // Get the cursor position where it should end up (after suggestion, before indicator)
+                int cursorPos = strlen(displayBuffer);
+                
+                // Add the indicator to the display buffer
+                strcat(displayBuffer, indicatorBuffer);
+                
+                // Clear the line and print everything at once to avoid cursor flicker
+                
+                // First, FillConsoleOutputCharacter to clear the line
+                DWORD numCharsWritten;
+                FillConsoleOutputCharacter(hConsole, ' ', 80, promptEndPos, &numCharsWritten);
+                
+                // Move cursor to beginning of line
+                SetConsoleCursorPosition(hConsole, promptEndPos);
+                
+                // Print command and normal part of suggestion
+                printf("%s%s", original_line, matchPrefix);
+                
+                // Print rest of suggestion in gray
                 SetConsoleTextAttribute(hConsole, FOREGROUND_INTENSITY);
                 printf("%s", tab_matches[tab_index] + prefixLen);
+                
+                // Save cursor position (end of suggestion)
+                GetConsoleScreenBufferInfo(hConsole, &consoleInfo);
+                COORD endOfSuggestionPos = consoleInfo.dwCursorPosition;
+                
+                // Print indicator in gray
+                if (tab_num_matches > 1) {
+                    printf("%s", indicatorBuffer);
+                }
+                
+                // Reset text color
                 SetConsoleTextAttribute(hConsole, originalAttributes);
                 
-                // Display cycling indicator
-                if (tab_num_matches > 1) {
-                    // Get current cursor position after printing
-                    GetConsoleScreenBufferInfo(hConsole, &consoleInfo);
-                    COORD afterMatchPos = consoleInfo.dwCursorPosition;
-                    
-                    // Set text color to gray for the cycle indicator
-                    SetConsoleTextAttribute(hConsole, FOREGROUND_INTENSITY);
-                    
-                    // Display cycling indicator
-                    printf(" (%d/%d)", tab_index + 1, tab_num_matches);
-                    
-                    // Short delay to show the indicator
-                    Sleep(250);
-                    
-                    // Calculate spaces to erase the indicator
-                    char tempBuf[20];
-                    sprintf(tempBuf, " (%d/%d)", tab_index + 1, tab_num_matches);
-                    int indicatorLen = strlen(tempBuf);
-                    
-                    // Erase the indicator
-                    for (int i = 0; i < indicatorLen; i++) {
-                        putchar(' ');
-                    }
-                    
-                    // Reset color and position
-                    SetConsoleTextAttribute(hConsole, originalAttributes);
-                    SetConsoleCursorPosition(hConsole, afterMatchPos);
-                }
+                // Move cursor back to end of suggestion
+                SetConsoleCursorPosition(hConsole, endOfSuggestionPos);
                 
                 // Reset execution flag when using Tab
                 ready_to_execute = 0;
