@@ -1,3 +1,6 @@
+#include <fileapi.h>
+#include <minwinbase.h>
+#include <timezoneapi.h>
 #include <windows.h>
 #include <process.h>  // For _spawn functions
 #include <direct.h>   // For *chdir and *getcwd
@@ -6,12 +9,20 @@
 #include <string.h>
 #include <conio.h>  // For _getch
 #include <ctype.h>  // For isprint
+#include <winerror.h>
+#include <winnt.h>
 
 int lsh_cd(char **args);
 int lsh_help(char **args);
 int lsh_exit(char **args);
 int lsh_dir(char **args);
 int lsh_clear(char **args);
+int lsh_mkdir(char **args);
+int lsh_rmdir(char **args);
+int lsh_del(char **args);
+int lsh_touch(char **args);
+int lsh_pwd(char **args);
+int lsh_cat(char **args);
 
 #define KEY_TAB 9
 #define KEY_BACKSPACE 8
@@ -26,6 +37,13 @@ char *builtin_str[] = {
   "dir",
   "clear",
   "cls",
+  "mkdir",
+  "rmdir",
+  "del",
+  "rm",
+  "touch",
+  "pwd",
+  "cat",
 };
 
 int (*builtin_func[]) (char **) = {
@@ -36,11 +54,213 @@ int (*builtin_func[]) (char **) = {
   &lsh_dir,
   &lsh_clear,
   &lsh_clear,
+  &lsh_mkdir,
+  &lsh_rmdir,
+  &lsh_del,
+  &lsh_del,
+  &lsh_touch,
+  &lsh_pwd,
+  &lsh_cat,
 };
 
 int lsh_num_builtins() {
   return sizeof(builtin_str) / sizeof(char *);
 }
+
+
+int lsh_pwd(char **args){
+  char cwd[1024];
+
+  if (_getcwd(cwd, sizeof(cwd)) == NULL){
+    perror("lsh: pwd");
+    return 1;
+  }
+
+  printf("\n%s\n\n", cwd);
+  return 1;
+}
+
+
+int lsh_cat(char **args) {
+  if (args[1] == NULL) {
+    fprintf(stderr, "lsh: expected file argument to \"cat\"\n");
+    return 1;
+  }
+  
+  // Process each file argument
+  int i = 1;
+  int success = 1;
+  
+  while (args[i] != NULL) {
+    // Print filename and blank line before content
+    printf("\n--- %s ---\n\n", args[i]);
+    
+    // Open the file in binary mode to avoid automatic CRLF conversion
+    FILE *file = fopen(args[i], "rb");
+    
+    if (file == NULL) {
+      fprintf(stderr, "lsh: cannot open '%s': ", args[i]);
+      perror("");
+      success = 0;
+      i++;
+      continue;
+    }
+    
+    // Read and print file contents
+    char buffer[4096]; // Larger buffer for efficiency
+    size_t bytes_read;
+    
+    // Use fread instead of fgets to avoid line-based processing
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+      fwrite(buffer, 1, bytes_read, stdout);
+    }
+    
+    // Check for read errors
+    if (ferror(file)) {
+      fprintf(stderr, "lsh: error reading from '%s': ", args[i]);
+      perror("");
+      success = 0;
+    }
+    
+    // Close the file
+    fclose(file);
+    
+    // Print blank line after content
+    printf("\n\n");
+    
+    i++;
+  }
+  
+  return success;
+}
+
+
+int lsh_del(char **args) {
+  if (args[1] == NULL) {
+    fprintf(stderr, "lsh: expected file argument to \"del\"\n");
+    return 1;
+  }
+  
+  // Handle multiple files
+  int i = 1;
+  int success = 1;
+  
+  while (args[i] != NULL) {
+    // Try deleting each file
+    if (DeleteFile(args[i]) == 0) {
+      // DeleteFile returns 0 on failure, non-zero on success
+      DWORD error = GetLastError();
+      fprintf(stderr, "lsh: failed to delete '%s': ", args[i]);
+      
+      switch (error) {
+        case ERROR_FILE_NOT_FOUND:
+          fprintf(stderr, "file not found\n");
+          break;
+        case ERROR_ACCESS_DENIED:
+          fprintf(stderr, "access denied\n");
+          break;
+        default:
+          fprintf(stderr, "error code %lu\n", error);
+          break;
+      }
+      
+      success = 0;
+    } else {
+      printf("Deleted '%s'\n", args[i]);
+    }
+    
+    i++;
+  }
+  
+  return success;
+}
+
+
+
+
+
+int lsh_mkdir(char **args){
+  if (args[1] == NULL){
+    fprintf(stderr, "lsh: expected argument to \"mkdir\"\n");
+    return 1;
+  }
+
+  if (_mkdir(args[1]) != 0){
+    perror("lsh: mkdir");
+  }
+
+  return 1;
+}
+
+
+int lsh_rmdir(char **args){
+  if (args[1] == NULL){
+    fprintf(stderr, "lsh: expected argument to \"rmdir\"\n");
+    return 1;
+  }
+
+
+  if (_rmdir(args[1]) != 0){
+    perror("lsh: rmdir");
+  }
+
+  return 1;
+}
+
+
+int lsh_touch(char **args) {
+  if (args[1] == NULL) {
+    fprintf(stderr, "lsh: expected file argument to \"touch\"\n");
+    return 1;
+  }
+  
+  // Handle multiple files
+  int i = 1;
+  int success = 1;
+  
+  while (args[i] != NULL) {
+    // Check if file exists
+    HANDLE hFile = CreateFile(
+      args[i],                       // filename
+      FILE_WRITE_ATTRIBUTES,         // access mode
+      FILE_SHARE_READ | FILE_SHARE_WRITE, // share mode
+      NULL,                          // security attributes
+      OPEN_ALWAYS,                   // create if doesn't exist, open if does
+      FILE_ATTRIBUTE_NORMAL,         // file attributes
+      NULL                           // template file
+    );
+    
+    if (hFile == INVALID_HANDLE_VALUE) {
+      // Failed to create/open file
+      DWORD error = GetLastError();
+      fprintf(stderr, "lsh: failed to touch '%s': error code %lu\n", args[i], error);
+      success = 0;
+    } else {
+      // File was created or opened successfully
+      // Get current system time
+      SYSTEMTIME st;
+      FILETIME ft;
+      GetSystemTime(&st);
+      SystemTimeToFileTime(&st, &ft);
+      
+      // Update file times
+      if (!SetFileTime(hFile, &ft, &ft, &ft)) {
+        fprintf(stderr, "lsh: failed to update timestamps for '%s'\n", args[i]);
+        success = 0;
+      }
+      
+      // Close file handle
+      CloseHandle(hFile);
+      
+      printf("Created/updated '%s'\n", args[i]);
+    }
+    
+    i++;
+  }
+  
+  return success;
+}
+
 
 int lsh_cd(char **args) {
   if (args[1] == NULL) {
@@ -742,14 +962,15 @@ void lsh_loop(void) {
   int status;
   char cwd[1024];
   char prompt_path[1024];
-  char username[256] = "user"; // Default value if username can't be retrieved
-  DWORD username_len = sizeof(username);
-  
-  // Get the Windows username once (doesn't change during execution)
-  if (!GetUserName(username, &username_len)) {
-    perror("lsh: failed to get username");
-  }
-  
+  char username[256] = "Elden Lord";
+  /*char username[256] = "user"; // Default value if username can't be retrieved*/
+  /*DWORD username_len = sizeof(username);*/
+  /**/
+  /*// Get the Windows username once (doesn't change during execution)*/
+  /*if (!GetUserName(username, &username_len)) {*/
+  /*  perror("lsh: failed to get username");*/
+  /*}*/
+  /**/
   do {
     // Get current directory for the prompt
     if (_getcwd(cwd, sizeof(cwd)) == NULL) {
