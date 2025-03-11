@@ -1059,12 +1059,38 @@ char *lsh_read_line(void) {
             }
         } else if (isprint(c)) {
             // Regular printable character
-            putchar(c);  // Echo character
-            buffer[position] = c;
-            position++;
             
-            // Reset tab completion state when editing
+            // Special handling when tab cycling is active but user hasn't accepted a suggestion
             if (tab_matches) {
+                // Hide cursor temporarily
+                CONSOLE_CURSOR_INFO cursorInfo;
+                GetConsoleCursorInfo(hConsole, &cursorInfo);
+                BOOL originalCursorVisible = cursorInfo.bVisible;
+                cursorInfo.bVisible = FALSE;
+                SetConsoleCursorInfo(hConsole, &cursorInfo);
+                
+                // Restore original input (what user typed before tab)
+                buffer[tab_word_start] = '\0';
+                strcat(buffer, last_tab_prefix);
+                position = tab_word_start + strlen(last_tab_prefix);
+                
+                // Clear the entire line
+                DWORD numCharsWritten;
+                FillConsoleOutputCharacter(hConsole, ' ', 120, promptEndPos, &numCharsWritten);
+                FillConsoleOutputAttribute(hConsole, originalAttributes, 120, promptEndPos, &numCharsWritten);
+                
+                // Move cursor to beginning of line
+                SetConsoleCursorPosition(hConsole, promptEndPos);
+                
+                // Redraw the original input
+                WriteConsole(hConsole, buffer, strlen(buffer), &numCharsWritten, NULL);
+                
+                // Now add the new character
+                buffer[position] = c;
+                position++;
+                WriteConsole(hConsole, &c, 1, &numCharsWritten, NULL);
+                
+                // Clean up tab completion resources
                 for (int i = 0; i < tab_num_matches; i++) {
                     free(tab_matches[i]);
                 }
@@ -1073,6 +1099,15 @@ char *lsh_read_line(void) {
                 tab_num_matches = 0;
                 tab_index = 0;
                 last_tab_prefix[0] = '\0';
+                
+                // Show cursor again
+                cursorInfo.bVisible = originalCursorVisible;
+                SetConsoleCursorInfo(hConsole, &cursorInfo);
+            } else {
+                // Standard character handling when not in tab cycling mode
+                putchar(c);  // Echo character
+                buffer[position] = c;
+                position++;
             }
             
             // Reset execution flag when editing
