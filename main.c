@@ -572,6 +572,9 @@ char *lsh_read_line(void) {
     // Flag to track if we're showing a suggestion
     int showing_suggestion = 0;
     
+    // Flag to track if we're ready to execute after accepting a suggestion
+    int ready_to_execute = 0;
+    
     // Variables to track the prompt and original line
     static char original_line[LSH_RL_BUFSIZE];
     COORD promptEndPos;
@@ -613,7 +616,7 @@ char *lsh_read_line(void) {
         }
         
         // Find and display new suggestion only if we're not in tab cycling mode
-        if (!tab_matches) {
+        if (!tab_matches && !ready_to_execute) {
             buffer[position] = '\0';  // Ensure buffer is null-terminated
             suggestion = find_best_match(buffer);
             if (suggestion) {
@@ -657,8 +660,35 @@ char *lsh_read_line(void) {
         c = _getch();  // Get character without echo
         
         if (c == KEY_ENTER) {
+            // If we're ready to execute after accepting a suggestion
+            if (ready_to_execute) {
+                putchar('\n');  // Echo newline
+                buffer[position] = '\0';
+                
+                // Clean up
+                if (suggestion) {
+                    free(suggestion);
+                    suggestion = NULL;
+                }
+                showing_suggestion = 0;
+                
+                // Clean up tab completion resources
+                if (tab_matches) {
+                    for (int i = 0; i < tab_num_matches; i++) {
+                        free(tab_matches[i]);
+                    }
+                    free(tab_matches);
+                    tab_matches = NULL;
+                    tab_num_matches = 0;
+                    tab_index = 0;
+                    last_tab_prefix[0] = '\0';
+                }
+                
+                ready_to_execute = 0;
+                return buffer;
+            }
             // If we're in tab cycling mode, accept the current suggestion
-            if (tab_matches) {
+            else if (tab_matches) {
                 // Tab cycling is active - accept the current suggestion but don't execute
                 // Find the start of the current word
                 int word_start = tab_word_start;
@@ -690,6 +720,9 @@ char *lsh_read_line(void) {
                 // Print the full command with the accepted match
                 buffer[position] = '\0';
                 printf("%s", buffer);
+                
+                // Set flag to execute on next Enter
+                ready_to_execute = 1;
                 
                 // Continue editing - don't submit yet
                 continue;
@@ -735,6 +768,9 @@ char *lsh_read_line(void) {
                 strcpy(buffer, tempBuffer);
                 position = strlen(buffer);
                 
+                // Set flag to execute on next Enter
+                ready_to_execute = 1;
+                
                 // Continue editing - don't submit yet
                 free(suggestion);
                 suggestion = NULL;
@@ -766,13 +802,30 @@ char *lsh_read_line(void) {
         } else if (c == KEY_BACKSPACE) {
             // User pressed Backspace
             if (position > 0) {
-                position--;
-                // Move cursor back, print space, move cursor back again
-                printf("\b \b");
-                buffer[position] = '\0';
-                
-                // Reset tab completion state when editing
+                // Handle backspace differently when in tab cycling mode
                 if (tab_matches) {
+                    // If in tab cycling mode, immediately revert to original input
+                    // Clear the line and redraw with just the original input
+                    GetConsoleScreenBufferInfo(hConsole, &consoleInfo);
+                    SetConsoleCursorPosition(hConsole, promptEndPos);
+                    
+                    // Clear the entire line
+                    for (int i = 0; i < 80; i++) {
+                        putchar(' ');
+                    }
+                    
+                    // Move cursor back to beginning of line
+                    SetConsoleCursorPosition(hConsole, promptEndPos);
+                    
+                    // Restore original buffer and position (what the user typed)
+                    buffer[tab_word_start] = '\0';
+                    strcat(buffer, last_tab_prefix);
+                    position = tab_word_start + strlen(last_tab_prefix);
+                    
+                    // Print the original input
+                    printf("%s", buffer);
+                    
+                    // Reset tab cycling
                     for (int i = 0; i < tab_num_matches; i++) {
                         free(tab_matches[i]);
                     }
@@ -781,7 +834,16 @@ char *lsh_read_line(void) {
                     tab_num_matches = 0;
                     tab_index = 0;
                     last_tab_prefix[0] = '\0';
+                } else {
+                    // Standard backspace behavior when not in tab cycling mode
+                    position--;
+                    // Move cursor back, print space, move cursor back again
+                    printf("\b \b");
+                    buffer[position] = '\0';
                 }
+                
+                // Reset execution flag when editing
+                ready_to_execute = 0;
             }
         } else if (c == KEY_TAB) {
             // User pressed Tab - activate completion
@@ -858,8 +920,19 @@ char *lsh_read_line(void) {
                 // Print the prefix part that the user typed
                 printf("%s", original_line);
                 
-                // Print the current match
-                printf("%s", tab_matches[tab_index]);
+                // Get prefix length for later use
+                int prefixLen = strlen(last_tab_prefix);
+                
+                // Print the matching prefix part in normal color
+                char matchPrefix[1024] = "";
+                strncpy(matchPrefix, tab_matches[tab_index], prefixLen);
+                matchPrefix[prefixLen] = '\0';
+                printf("%s", matchPrefix);
+                
+                // Print the rest of the match in gray
+                SetConsoleTextAttribute(hConsole, FOREGROUND_INTENSITY);
+                printf("%s", tab_matches[tab_index] + prefixLen);
+                SetConsoleTextAttribute(hConsole, originalAttributes);
                 
                 // Display cycling indicator
                 if (tab_num_matches > 1) {
@@ -891,8 +964,8 @@ char *lsh_read_line(void) {
                     SetConsoleCursorPosition(hConsole, afterMatchPos);
                 }
                 
-                // Important: buffer remains unchanged until user accepts with Enter
-                // This ensures proper cycling without concatenating suggestions
+                // Reset execution flag when using Tab
+                ready_to_execute = 0;
             }
         } else if (isprint(c)) {
             // Regular printable character
@@ -911,6 +984,9 @@ char *lsh_read_line(void) {
                 tab_index = 0;
                 last_tab_prefix[0] = '\0';
             }
+            
+            // Reset execution flag when editing
+            ready_to_execute = 0;
             
             // Resize buffer if needed
             if (position >= bufsize) {
